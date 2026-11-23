@@ -339,7 +339,11 @@ export function MeetingRoomPage() {
         setCameraOff(!state.camera_enabled)
 
         const { data, error: tokenError } = await requireSupabase().functions.invoke('livekit-token', { body: { code: meetingId } })
-        if (tokenError) throw tokenError
+        if (tokenError) {
+          const status = 'status' in tokenError && typeof tokenError.status === 'number' ? tokenError.status : null
+          if (status === 404) throw new Error('The media service is not deployed. Ask the site administrator to deploy the livekit-token Edge Function.')
+          throw new Error(tokenError.message || 'Could not request a LiveKit connection.')
+        }
         if (!data || typeof data !== 'object' || !('url' in data) || !('token' in data) || typeof data.url !== 'string' || typeof data.token !== 'string') {
           throw new Error('The media service returned an invalid connection response.')
         }
