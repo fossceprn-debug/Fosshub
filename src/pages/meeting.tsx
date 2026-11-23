@@ -196,7 +196,12 @@ export function LobbyPage() {
         navigate(`/meeting/${meetingId}`, { replace: true })
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not join this meeting.')
+      const msg = reason instanceof Error ? reason.message : 'Could not join this meeting.'
+      if (msg.toLowerCase().includes('anonymous') || msg.toLowerCase().includes('guest')) {
+        setError('Guest sign-in is disabled on this server. Please sign in with an account to join.')
+      } else {
+        setError(msg)
+      }
     } finally {
       setBusy(false)
     }
@@ -250,7 +255,14 @@ export function LobbyPage() {
           <div className="field"><label htmlFor="lobby-name">Your name</label><input id="lobby-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={80} autoComplete="name" required /></div>
           {meeting?.password_required && <div className="field"><label htmlFor="lobby-password">Meeting password</label><input id="lobby-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></div>}
           {preview.devices.some((device) => device.kind === 'audioinput') && <div className="field"><label htmlFor="lobby-microphone">Microphone</label><select id="lobby-microphone" defaultValue={localStorage.getItem('fosshub-microphone') || ''} onChange={(event) => void preview.selectDevice('audioinput', event.target.value)}><option value="">Default microphone</option>{preview.devices.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></div>}
-          {error && <div className="field-error" role="alert">{error}</div>}
+          {error && (
+            <div className="field-error" role="alert" style={{ marginBottom: 12 }}>
+              <div>{error}</div>
+              {error.includes('sign in') && !user && (
+                <Link to="/signin" className="btn btn-secondary btn-small" style={{ marginTop: 8, display: 'inline-flex' }}>Sign in to continue</Link>
+              )}
+            </div>
+          )}
           <div className="field-hint">Camera and microphone are sent only after you join the live room.</div>
           <button className="btn btn-primary" style={{ width: '100%', marginTop: 12 }} onClick={() => void join()} disabled={loading || busy || !meeting}>{busy ? 'Joining…' : 'Join meeting'} <Video size={15} /></button>
         </section>
@@ -259,14 +271,20 @@ export function LobbyPage() {
   )
 }
 
-function VideoElement({ track }: { track?: VideoTrack }) {
+function VideoElement({ track, stream }: { track?: VideoTrack; stream?: MediaStream | null }) {
   const element = useRef<HTMLVideoElement>(null)
   useEffect(() => {
-    if (!track || !element.current) return
+    if (!element.current) return
     const node = element.current
-    track.attach(node)
-    return () => { track.detach(node) }
-  }, [track])
+    if (stream) {
+      node.srcObject = stream
+      return () => { node.srcObject = null }
+    }
+    if (track) {
+      track.attach(node)
+      return () => { track.detach(node) }
+    }
+  }, [track, stream])
   return <video ref={element} autoPlay muted playsInline />
 }
 
@@ -297,8 +315,13 @@ export function MeetingRoomPage() {
   const [error, setError] = useState('')
   const [connecting, setConnecting] = useState(true)
   const [connected, setConnected] = useState(false)
+  const [isLiveKit, setIsLiveKit] = useState(false)
   const [localVideoTrack, setLocalVideoTrack] = useState<VideoTrack>()
   const [localScreenTrack, setLocalScreenTrack] = useState<VideoTrack>()
+  const [localMediaStream, setLocalMediaStream] = useState<MediaStream | null>(null)
+  const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null)
+  const localStreamRef = useRef<MediaStream | null>(null)
+  const localScreenRef = useRef<MediaStream | null>(null)
   const [muted, setMuted] = useState(true)
   const [cameraOff, setCameraOff] = useState(true)
   const [sharing, setSharing] = useState(false)
@@ -338,94 +361,109 @@ export function MeetingRoomPage() {
         setMuted(!state.mic_enabled)
         setCameraOff(!state.camera_enabled)
 
-        const { data, error: tokenError } = await requireSupabase().functions.invoke('livekit-token', { body: { code: meetingId } })
-        if (tokenError) {
-          const status = 'status' in tokenError && typeof tokenError.status === 'number' ? tokenError.status : null
-          if (status === 404) throw new Error('The media service is not deployed. Ask the site administrator to deploy the livekit-token Edge Function.')
-          throw new Error(tokenError.message || 'Could not request a LiveKit connection.')
-        }
-        if (!data || typeof data !== 'object' || !('url' in data) || !('token' in data) || typeof data.url !== 'string' || typeof data.token !== 'string') {
-          throw new Error('The media service returned an invalid connection response.')
+        let liveKitConnected = false
+        try {
+          const { data, error: tokenError } = await requireSupabase().functions.invoke('livekit-token', { body: { code: meetingId } })
+          if (!tokenError && data && typeof data === 'object' && 'url' in data && 'token' in data && typeof data.url === 'string' && typeof data.token === 'string') {
+            const room = new Room({ adaptiveStream: true, dynacast: true })
+            connectingRoom = room
+            roomRef.current = room
+            const updateRemoteParticipants = () => {
+              if (active) setRemoteParticipants(Array.from(room.remoteParticipants.values()))
+            }
+            room.on(RoomEvent.ParticipantConnected, updateRemoteParticipants)
+            room.on(RoomEvent.ParticipantDisconnected, updateRemoteParticipants)
+            room.on(RoomEvent.TrackPublished, updateRemoteParticipants)
+            room.on(RoomEvent.TrackSubscribed, updateRemoteParticipants)
+            room.on(RoomEvent.TrackUnsubscribed, updateRemoteParticipants)
+            room.on(RoomEvent.LocalTrackPublished, (publication) => {
+              if (!active) return
+              if (publication.source === Track.Source.Camera) setLocalVideoTrack(publication.track as VideoTrack)
+              if (publication.source === Track.Source.ScreenShare) setLocalScreenTrack(publication.track as VideoTrack)
+            })
+            room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+              if (!active) return
+              if (publication.source === Track.Source.Camera) setLocalVideoTrack(undefined)
+              if (publication.source === Track.Source.ScreenShare) {
+                setLocalScreenTrack(undefined)
+                setSharing(false)
+              }
+            })
+            room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+              if (!active) return
+              setActiveSpeakerIds(speakers.map((speaker) => speaker.identity).filter((identity) => identity !== user?.id))
+            })
+            room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+              if (!active || topic !== 'reaction') return
+              try {
+                const event: unknown = JSON.parse(new TextDecoder().decode(payload))
+                if (event && typeof event === 'object' && 'emoji' in event && typeof event.emoji === 'string') {
+                  setReaction(`${event.emoji}${participant ? ` ${participant.name || 'Participant'}` : ''}`)
+                  window.setTimeout(() => setReaction(''), 1800)
+                }
+              } catch (reason) {
+                console.error('Unable to decode meeting reaction.', reason)
+              }
+            })
+            room.on(RoomEvent.Disconnected, () => {
+              if (!active) return
+              setConnected(false)
+              setError('Your media connection ended. Rejoin the meeting to continue.')
+            })
+            await room.connect(data.url, data.token, { autoSubscribe: false })
+            if (active) {
+              setConnected(true)
+              setIsLiveKit(true)
+              liveKitConnected = true
+              setRemoteParticipants(Array.from(room.remoteParticipants.values()))
+              const outputId = localStorage.getItem('fosshub-audio-output')
+              if (outputId) {
+                try {
+                  const switched = await room.switchActiveDevice('audiooutput', outputId)
+                  if (!switched) notify('Saved audio output is unavailable; using the browser default.')
+                } catch {
+                  notify('Saved audio output could not be selected; using the browser default.')
+                }
+              }
+              if (state.mic_enabled) {
+                const deviceId = localStorage.getItem('fosshub-microphone')
+                await room.localParticipant.setMicrophoneEnabled(true, deviceId ? { deviceId } : {})
+              }
+              if (state.camera_enabled) {
+                const deviceId = localStorage.getItem('fosshub-camera')
+                const preferredQuality = localStorage.getItem('fosshub-video-quality') || 'Auto'
+                const preset = preferredQuality === '720p' ? VideoPresets.h720 : preferredQuality === '540p' ? VideoPresets.h540 : preferredQuality === '360p' ? VideoPresets.h360 : undefined
+                await room.localParticipant.setCameraEnabled(
+                  true,
+                  { ...(deviceId ? { deviceId } : {}), ...(preset ? { resolution: preset.resolution } : {}) },
+                  preset ? { videoEncoding: preset.encoding } : {},
+                )
+              }
+            }
+          }
+        } catch (mediaError) {
+          console.warn('LiveKit SFU not available, falling back to direct media mode:', mediaError)
         }
 
-        const room = new Room({ adaptiveStream: true, dynacast: true })
-        connectingRoom = room
-        roomRef.current = room
-        const updateRemoteParticipants = () => {
-          if (active) setRemoteParticipants(Array.from(room.remoteParticipants.values()))
-        }
-        room.on(RoomEvent.ParticipantConnected, updateRemoteParticipants)
-        room.on(RoomEvent.ParticipantDisconnected, updateRemoteParticipants)
-        room.on(RoomEvent.TrackPublished, updateRemoteParticipants)
-        room.on(RoomEvent.TrackSubscribed, updateRemoteParticipants)
-        room.on(RoomEvent.TrackUnsubscribed, updateRemoteParticipants)
-        room.on(RoomEvent.LocalTrackPublished, (publication) => {
-          if (!active) return
-          if (publication.source === Track.Source.Camera) setLocalVideoTrack(publication.track as VideoTrack)
-          if (publication.source === Track.Source.ScreenShare) setLocalScreenTrack(publication.track as VideoTrack)
-        })
-        room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
-          if (!active) return
-          if (publication.source === Track.Source.Camera) setLocalVideoTrack(undefined)
-          if (publication.source === Track.Source.ScreenShare) {
-            setLocalScreenTrack(undefined)
-            setSharing(false)
-          }
-        })
-        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-          if (!active) return
-          setActiveSpeakerIds(speakers.map((speaker) => speaker.identity).filter((identity) => identity !== user?.id))
-        })
-        room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
-          if (!active || topic !== 'reaction') return
-          try {
-            const event: unknown = JSON.parse(new TextDecoder().decode(payload))
-            if (event && typeof event === 'object' && 'emoji' in event && typeof event.emoji === 'string') {
-              setReaction(`${event.emoji}${participant ? ` ${participant.name || 'Participant'}` : ''}`)
-              window.setTimeout(() => setReaction(''), 1800)
+        if (!liveKitConnected && active) {
+          setIsLiveKit(false)
+          setConnected(true)
+          if (navigator.mediaDevices?.getUserMedia && (state.camera_enabled || state.mic_enabled)) {
+            try {
+              const cameraId = localStorage.getItem('fosshub-camera')
+              const microphoneId = localStorage.getItem('fosshub-microphone')
+              const stream = await navigator.mediaDevices.getUserMedia({
+                video: state.camera_enabled ? (cameraId ? { deviceId: { exact: cameraId } } : true) : false,
+                audio: state.mic_enabled ? (microphoneId ? { deviceId: { exact: microphoneId } } : true) : false,
+              })
+              if (active) {
+                localStreamRef.current = stream
+                setLocalMediaStream(stream)
+              }
+            } catch (deviceError) {
+              console.warn('Could not initialize local media devices:', deviceError)
             }
-          } catch (reason) {
-            console.error('Unable to decode meeting reaction.', reason)
           }
-        })
-        room.on(RoomEvent.Disconnected, () => {
-          if (!active) return
-          setConnected(false)
-          setError('Your media connection ended. Rejoin the meeting to continue.')
-        })
-        await room.connect(data.url, data.token, { autoSubscribe: false })
-        if (!active) {
-          await room.disconnect()
-          setLocalVideoTrack(undefined)
-          return
-        }
-        setConnected(true)
-        setRemoteParticipants(Array.from(room.remoteParticipants.values()))
-        const outputId = localStorage.getItem('fosshub-audio-output')
-        if (active && outputId) {
-          try {
-            const switched = await room.switchActiveDevice('audiooutput', outputId)
-            if (active && !switched) notify('Saved audio output is unavailable; using the browser default.')
-          } catch {
-            if (active) notify('Saved audio output could not be selected; using the browser default.')
-          }
-        }
-        if (!active) { await room.disconnect(); return }
-        if (state.mic_enabled) {
-          const deviceId = localStorage.getItem('fosshub-microphone')
-          await room.localParticipant.setMicrophoneEnabled(true, deviceId ? { deviceId } : {})
-          if (!active) { await room.disconnect(); return }
-        }
-        if (state.camera_enabled) {
-          const deviceId = localStorage.getItem('fosshub-camera')
-          const preferredQuality = localStorage.getItem('fosshub-video-quality') || 'Auto'
-          const preset = preferredQuality === '720p' ? VideoPresets.h720 : preferredQuality === '540p' ? VideoPresets.h540 : preferredQuality === '360p' ? VideoPresets.h360 : undefined
-          await room.localParticipant.setCameraEnabled(
-            true,
-            { ...(deviceId ? { deviceId } : {}), ...(preset ? { resolution: preset.resolution } : {}) },
-            preset ? { videoEncoding: preset.encoding } : {},
-          )
-          if (!active) { await room.disconnect(); return }
         }
       } catch (reason) {
         await connectingRoom?.disconnect()
@@ -445,6 +483,14 @@ export function MeetingRoomPage() {
       const room = roomRef.current
       roomRef.current = null
       if (room) void room.disconnect()
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => track.stop())
+        localStreamRef.current = null
+      }
+      if (localScreenRef.current) {
+        localScreenRef.current.getTracks().forEach((track) => track.stop())
+        localScreenRef.current = null
+      }
     }
   }, [meetingId, notify, user?.id])
 
@@ -533,44 +579,101 @@ export function MeetingRoomPage() {
     }
   }
   const toggleMicrophone = async () => {
-    const room = roomRef.current
-    if (!room) return
-    try {
-      const deviceId = localStorage.getItem('fosshub-microphone')
-      await room.localParticipant.setMicrophoneEnabled(muted, deviceId ? { deviceId } : {})
-      const nextMuted = !muted
-      setMuted(nextMuted)
-      await reportMediaState(nextMuted, cameraOff, handRaised)
-    } catch (reason) {
-      notify(reason instanceof Error ? reason.message : 'Could not change microphone state.')
+    const nextMuted = !muted
+    setMuted(nextMuted)
+    if (roomRef.current) {
+      try {
+        const deviceId = localStorage.getItem('fosshub-microphone')
+        await roomRef.current.localParticipant.setMicrophoneEnabled(!nextMuted, deviceId ? { deviceId } : {})
+      } catch (reason) {
+        notify(reason instanceof Error ? reason.message : 'Could not change microphone state.')
+      }
+    } else {
+      if (localMediaStream) {
+        localMediaStream.getAudioTracks().forEach((track) => { track.enabled = !nextMuted })
+      } else if (!nextMuted && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const micId = localStorage.getItem('fosshub-microphone')
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: micId ? { deviceId: { exact: micId } } : true })
+          if (localStreamRef.current) {
+            stream.getAudioTracks().forEach((t) => localStreamRef.current?.addTrack(t))
+            setLocalMediaStream(new MediaStream(localStreamRef.current.getTracks()))
+          } else {
+            localStreamRef.current = stream
+            setLocalMediaStream(stream)
+          }
+        } catch {
+          notify('Microphone is unavailable.')
+        }
+      }
     }
+    await reportMediaState(nextMuted, cameraOff, handRaised)
   }
   const toggleCamera = async () => {
-    const room = roomRef.current
-    if (!room) return
-    try {
-      const preset = quality === '720p' ? VideoPresets.h720 : quality === '540p' ? VideoPresets.h540 : quality === '360p' ? VideoPresets.h360 : undefined
-      const deviceId = localStorage.getItem('fosshub-camera')
-      await room.localParticipant.setCameraEnabled(
-        cameraOff,
-        { ...(deviceId ? { deviceId } : {}), ...(preset ? { resolution: preset.resolution } : {}) },
-        preset ? { videoEncoding: preset.encoding } : {},
-      )
-      const nextCameraOff = !cameraOff
-      setCameraOff(nextCameraOff)
-      await reportMediaState(muted, nextCameraOff, handRaised)
-    } catch (reason) {
-      notify(reason instanceof Error ? reason.message : 'Could not change camera state.')
+    const nextCameraOff = !cameraOff
+    setCameraOff(nextCameraOff)
+    if (roomRef.current) {
+      try {
+        const preset = quality === '720p' ? VideoPresets.h720 : quality === '540p' ? VideoPresets.h540 : quality === '360p' ? VideoPresets.h360 : undefined
+        const deviceId = localStorage.getItem('fosshub-camera')
+        await roomRef.current.localParticipant.setCameraEnabled(
+          !nextCameraOff,
+          { ...(deviceId ? { deviceId } : {}), ...(preset ? { resolution: preset.resolution } : {}) },
+          preset ? { videoEncoding: preset.encoding } : {},
+        )
+      } catch (reason) {
+        notify(reason instanceof Error ? reason.message : 'Could not change camera state.')
+      }
+    } else {
+      if (localMediaStream && localMediaStream.getVideoTracks().length > 0) {
+        localMediaStream.getVideoTracks().forEach((track) => { track.enabled = !nextCameraOff })
+      } else if (!nextCameraOff && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const camId = localStorage.getItem('fosshub-camera')
+          const stream = await navigator.mediaDevices.getUserMedia({ video: camId ? { deviceId: { exact: camId } } : true })
+          if (localStreamRef.current) {
+            stream.getVideoTracks().forEach((t) => localStreamRef.current?.addTrack(t))
+            setLocalMediaStream(new MediaStream(localStreamRef.current.getTracks()))
+          } else {
+            localStreamRef.current = stream
+            setLocalMediaStream(stream)
+          }
+        } catch {
+          notify('Camera is unavailable.')
+        }
+      }
     }
+    await reportMediaState(muted, nextCameraOff, handRaised)
   }
   const shareScreen = async () => {
-    const room = roomRef.current
-    if (!room) return
-    try {
-      await room.localParticipant.setScreenShareEnabled(!sharing)
-      setSharing((current) => !current)
-    } catch (reason) {
-      notify(reason instanceof Error ? reason.message : 'Screen sharing was cancelled or not available.')
+    if (roomRef.current) {
+      try {
+        await roomRef.current.localParticipant.setScreenShareEnabled(!sharing)
+        setSharing((current) => !current)
+      } catch (reason) {
+        notify(reason instanceof Error ? reason.message : 'Screen sharing was cancelled or not available.')
+      }
+    } else {
+      if (sharing) {
+        localScreenRef.current?.getTracks().forEach((t) => t.stop())
+        localScreenRef.current = null
+        setLocalScreenStream(null)
+        setSharing(false)
+      } else if (navigator.mediaDevices?.getDisplayMedia) {
+        try {
+          const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+          localScreenRef.current = screenStream
+          setLocalScreenStream(screenStream)
+          setSharing(true)
+          screenStream.getVideoTracks()[0].onended = () => {
+            localScreenRef.current = null
+            setLocalScreenStream(null)
+            setSharing(false)
+          }
+        } catch {
+          notify('Screen sharing was cancelled or not supported.')
+        }
+      }
     }
   }
   const toggleHand = async () => {
@@ -592,11 +695,13 @@ export function MeetingRoomPage() {
   const react = async (emoji: string) => {
     setReaction(emoji)
     setReactionMenu(false)
-    const data = new TextEncoder().encode(JSON.stringify({ emoji }))
-    try {
-      await roomRef.current?.localParticipant.publishData(data, { reliable: true, topic: 'reaction' })
-    } catch (reason) {
-      notify(reason instanceof Error ? reason.message : 'Could not send this reaction.')
+    if (roomRef.current) {
+      const data = new TextEncoder().encode(JSON.stringify({ emoji }))
+      try {
+        await roomRef.current?.localParticipant.publishData(data, { reliable: true, topic: 'reaction' })
+      } catch (reason) {
+        notify(reason instanceof Error ? reason.message : 'Could not send this reaction.')
+      }
     }
     window.setTimeout(() => setReaction(''), 1800)
   }
@@ -614,6 +719,14 @@ export function MeetingRoomPage() {
       if (endForEveryone && membership.role === 'host') await endMeeting(membership.meeting_id)
       else await leaveMeeting(membership.meeting_id)
       await roomRef.current?.disconnect()
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => track.stop())
+        localStreamRef.current = null
+      }
+      if (localScreenRef.current) {
+        localScreenRef.current.getTracks().forEach((track) => track.stop())
+        localScreenRef.current = null
+      }
       sessionStorage.removeItem(`${JOIN_STATE_PREFIX}${meetingId}`)
       navigate('/dashboard', { replace: true })
     } catch (reason) {
@@ -667,15 +780,22 @@ export function MeetingRoomPage() {
       <section className="meeting-stage" aria-label="Live meeting room">
         <header className="stage-top">
           <div className="stage-title"><span className="brand-mark"><Video size={17} /></span><div><strong>{membership?.title || 'FOSSHub meeting'}</strong><span>{meetingId} · {clock}</span></div></div>
-          <span className="connection-pill"><i className={`status-dot ${connected ? '' : 'off'}`} /> {connected ? 'Connected' : 'Reconnecting'}</span>
+          <span className="connection-pill" title={isLiveKit ? 'Connected to LiveKit SFU' : 'Running in direct local media mode'}>
+            <i className={`status-dot ${connected ? (isLiveKit ? '' : 'local') : 'off'}`} /> {connected ? (isLiveKit ? 'Connected' : 'Local media') : 'Reconnecting'}
+          </span>
           <button className="icon-button" aria-label="Copy invitation" onClick={() => void copyInvite()}><Copy size={15} /></button>
         </header>
+        {!isLiveKit && (
+          <div className="error-banner meeting-error" style={{ background: '#fef3c7', color: '#92400e', borderColor: '#fde68a' }} role="status">
+            LiveKit media server is not deployed. Running in local media mode — camera, chat, and participants are active.
+          </div>
+        )}
         {error && <div className="error-banner meeting-error" role="alert">{error}</div>}
         <div className="video-stage-body">
           <div className={`video-grid ${layout === 'speaker' ? 'speaker-layout' : ''}`}>
             <div className={`video-tile local-tile ${layout === 'speaker' && !focusedParticipantId ? 'focus-tile' : layout === 'speaker' ? 'speaker-side' : ''}`}>
-              {(sharing && localScreenTrack) || (!cameraOff && localVideoTrack)
-                ? <VideoElement track={sharing ? localScreenTrack : localVideoTrack} />
+              {(sharing && (localScreenTrack || localScreenStream)) || (!cameraOff && (localVideoTrack || localMediaStream))
+                ? <VideoElement track={sharing ? localScreenTrack : localVideoTrack} stream={sharing ? localScreenStream : localMediaStream} />
                 : <div className="tile-avatar">{(membership?.display_name || 'ME').slice(0, 2).toUpperCase()}</div>}
               <div className="tile-flags">{muted && <span className="tile-flag" title="Microphone muted"><MicOff size={13} /></span>}{sharing && <span className="tile-flag" title="Sharing screen"><Share size={13} /></span>}</div>
               <div className="tile-name">{membership?.display_name || 'You'} (You){membership?.role === 'host' ? ' · Host' : ''}</div>

@@ -104,7 +104,14 @@ export async function leaveMeeting(meetingId: string) {
 }
 
 export async function endMeeting(meetingId: string) {
-  const { error } = await requireSupabase().functions.invoke('end-livekit-meeting', { body: { meetingId } })
+  const client = requireSupabase()
+  try {
+    const { error } = await client.functions.invoke('end-livekit-meeting', { body: { meetingId } })
+    if (!error) return
+  } catch {
+    // Edge function not available; fallback to DB RPC
+  }
+  const { error } = await client.rpc('end_meeting', { p_meeting_id: meetingId })
   if (error) throw error
 }
 
