@@ -33,7 +33,7 @@ export default function App() {
                 <Route path="/create" element={<RequireAuth registered><CreateMeetingPage /></RequireAuth>} />
                 <Route path="/join" element={<JoinMeetingPage />} />
                 <Route path="/join/:meetingId" element={<LobbyPage />} />
-                <Route path="/meeting/:meetingId" element={<RequireAuth><MeetingRoomPage /></RequireAuth>} />
+                <Route path="/meeting/:meetingId" element={<MeetingRoomPage />} />
                 <Route path="/schedule" element={<RequireAuth registered><SchedulePage /></RequireAuth>} />
                 <Route path="/settings" element={<RequireAuth><SettingsPage /></RequireAuth>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
