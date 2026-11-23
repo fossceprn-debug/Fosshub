@@ -37,7 +37,12 @@ export function AuthPage({ mode }: { mode: 'signin' | 'signup' }) {
         navigate('/dashboard', { replace: true })
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Authentication failed. Please try again.')
+      const msg = reason instanceof Error ? reason.message : 'Authentication failed. Please try again.'
+      if (msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('over_email_send_rate_limit')) {
+        setError('Email sending limit reached by the server. You can start or join a meeting directly as a guest below without creating an account.')
+      } else {
+        setError(msg)
+      }
     } finally {
       setBusy(false)
     }
@@ -107,6 +112,15 @@ export function AuthPage({ mode }: { mode: 'signin' | 'signup' }) {
         {info && <div className="error-banner auth-note" role="status">{info}</div>}
         <button className="btn btn-primary" type="submit" style={{ width: '100%' }} disabled={busy}>{busy ? 'Please wait…' : isRecovery ? 'Update password' : isSignup ? 'Create account' : 'Sign in'}</button>
         {!isRecovery && <div className="auth-switch">{isSignup ? 'Already have an account?' : `New to ${APP_NAME}?`} <Link to={isSignup ? '/signin' : '/signup'}>{isSignup ? 'Sign in' : 'Create account'}</Link></div>}
+        {!isRecovery && (
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #e5e7eb', textAlign: 'center' }}>
+            <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--muted)' }}>No account needed to meet:</p>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <Link to="/create" className="btn btn-secondary" style={{ flex: 1, textAlign: 'center', fontSize: 13 }}>Start as Guest</Link>
+              <Link to="/join" className="btn btn-secondary" style={{ flex: 1, textAlign: 'center', fontSize: 13 }}>Join a Meeting</Link>
+            </div>
+          </div>
+        )}
       </form>
     </main>
   )

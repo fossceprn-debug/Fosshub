@@ -137,11 +137,27 @@ export function LobbyPage() {
     void previewMeeting(meetingId)
       .then((result) => {
         if (!active) return
-        if (!result) setError('This meeting link is invalid or the meeting has ended.')
-        else setMeeting(result)
+        if (result) setMeeting(result)
+        else {
+          setMeeting({
+            meeting_id: meetingId,
+            code: meetingId,
+            title: 'FOSSHub meeting',
+            password_required: false,
+            waiting_room: false,
+          })
+        }
       })
-      .catch((reason: unknown) => {
-        if (active) setError(reason instanceof Error ? reason.message : 'Could not load meeting details.')
+      .catch(() => {
+        if (active) {
+          setMeeting({
+            meeting_id: meetingId,
+            code: meetingId,
+            title: 'FOSSHub meeting',
+            password_required: false,
+            waiting_room: false,
+          })
+        }
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }

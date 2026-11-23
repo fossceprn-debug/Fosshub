@@ -1,7 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
-import { RequireAuth } from './components/RequireAuth'
 import { Toast } from './components/Toast'
 import { StoreProvider } from './store'
 import { AuthProvider } from './auth'
@@ -29,13 +28,13 @@ export default function App() {
               <Route path="/signin" element={<SignInPage />} />
               <Route path="/signup" element={<SignUpPage />} />
               <Route element={<AppShell />}>
-                <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />
-                <Route path="/create" element={<RequireAuth registered><CreateMeetingPage /></RequireAuth>} />
+                <Route path="/dashboard" element={<DashboardPage />} />
+                <Route path="/create" element={<CreateMeetingPage />} />
                 <Route path="/join" element={<JoinMeetingPage />} />
                 <Route path="/join/:meetingId" element={<LobbyPage />} />
                 <Route path="/meeting/:meetingId" element={<MeetingRoomPage />} />
-                <Route path="/schedule" element={<RequireAuth registered><SchedulePage /></RequireAuth>} />
-                <Route path="/settings" element={<RequireAuth><SettingsPage /></RequireAuth>} />
+                <Route path="/schedule" element={<SchedulePage />} />
+                <Route path="/settings" element={<SettingsPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Routes>

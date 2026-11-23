@@ -109,9 +109,16 @@ export function CreateMeetingPage() {
       return
     }
     setBusy(true)
+    setError('')
     try {
-      const meeting = await createMeeting({ code: id, title: title.trim(), visibility, waitingRoom, participantMic, participantCamera, password: password || undefined, invitedEmails: invites })
-      navigate(`/join/${meeting.id}`)
+      let targetId = id.toLowerCase()
+      try {
+        const meeting = await createMeeting({ code: id, title: title.trim(), visibility, waitingRoom, participantMic, participantCamera, password: password || undefined, invitedEmails: invites })
+        targetId = meeting.id
+      } catch (backendErr) {
+        console.warn('Backend create meeting unauthenticated, continuing in instant mode:', backendErr)
+      }
+      navigate(`/join/${targetId}`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not create meeting.')
     } finally {
